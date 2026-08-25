@@ -11,8 +11,9 @@
 #   REF         git ref to install from (default: main)
 #
 # Safe to re-run: existing files are backed up as <file>.bak.<timestamp>.
-# All files are downloaded first and installed only if every download
-# succeeds, so a failed run never leaves a partial install.
+# All files are downloaded to a staging dir first and installed only if
+# every download succeeds, so a failed download never leaves a partial
+# install.
 # The installed version is recorded to $CLAUDE_DIR/.ai-consensus-skill.version
 # (a state stamp, overwritten on every install).
 set -euo pipefail
@@ -45,7 +46,7 @@ fi
 echo "Installing skills/agents from $RAW_BASE into $CLAUDE_DIR ..."
 echo "  version: $VERSION (ref: $REF)"
 
-# Phase 1: download everything; abort before touching $CLAUDE_DIR on any failure.
+# Phase 1: download everything; abort before installing anything on any failure.
 for repo_path in "${FILES[@]}"; do
   tmp="$TMP_DIR/${repo_path#.claude/}"
   mkdir -p "$(dirname "$tmp")"
