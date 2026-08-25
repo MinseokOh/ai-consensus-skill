@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installs the consensus + multi-review skills and the reviewer agents
-# (claude-reviewer, codex-reviewer, gemini-reviewer) into ~/.claude by
+# Installs the consensus + consensus-review skills and the worker agents
+# (claude-worker, codex-worker, gemini-worker) into ~/.claude by
 # downloading them from the public GitHub repo (raw paths).
 #
 # Usage:
@@ -26,10 +26,20 @@ STAMP="$(date +%Y%m%d%H%M%S)"
 
 FILES=(
   ".claude/skills/consensus/SKILL.md"
-  ".claude/skills/multi-review/SKILL.md"
-  ".claude/agents/claude-reviewer.md"
-  ".claude/agents/codex-reviewer.md"
-  ".claude/agents/gemini-reviewer.md"
+  ".claude/skills/consensus-review/SKILL.md"
+  ".claude/agents/claude-worker.md"
+  ".claude/agents/codex-worker.md"
+  ".claude/agents/gemini-worker.md"
+)
+
+# Files from older releases that this version supersedes; retired (backed up)
+# on install. Note: paths here are relative to $CLAUDE_DIR, while FILES above
+# are repo-relative (their leading ".claude/" is stripped on install).
+OBSOLETE_FILES=(
+  "skills/multi-review/SKILL.md"
+  "agents/claude-reviewer.md"
+  "agents/codex-reviewer.md"
+  "agents/gemini-reviewer.md"
 )
 
 mkdir -p "$CLAUDE_DIR"
@@ -69,6 +79,14 @@ for repo_path in "${FILES[@]}"; do
   echo "  installed: $dest"
 done
 
+for rel in "${OBSOLETE_FILES[@]}"; do
+  obsolete="$CLAUDE_DIR/$rel"
+  if [ -f "$obsolete" ]; then
+    mv "$obsolete" "$obsolete.bak.$STAMP"
+    echo "  retired: $obsolete -> $obsolete.bak.$STAMP"
+  fi
+done
+
 printf 'version=%s\nref=%s\ninstalled=%s\n' "$VERSION" "$REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   > "$CLAUDE_DIR/.ai-consensus-skill.version"
 
@@ -78,13 +96,13 @@ for cli in codex agy; do
   if command -v "$cli" >/dev/null 2>&1; then
     echo "  ok: $cli ($(command -v "$cli"))"
   else
-    echo "  MISSING: $cli — the ${cli}-based reviewer/agent will be excluded until it is installed & logged in."
+    echo "  MISSING: $cli — the ${cli}-based worker will be excluded until it is installed & logged in."
   fi
 done
 
 echo ""
 echo "Done. Installed ai-consensus-skill $VERSION (ref: $REF):"
-echo "  - skill: consensus     ($CLAUDE_DIR/skills/consensus/SKILL.md)"
-echo "  - skill: multi-review  ($CLAUDE_DIR/skills/multi-review/SKILL.md)"
-echo "  - agent: claude-reviewer, codex-reviewer, gemini-reviewer ($CLAUDE_DIR/agents/)"
+echo "  - skill: consensus         ($CLAUDE_DIR/skills/consensus/SKILL.md)"
+echo "  - skill: consensus-review  ($CLAUDE_DIR/skills/consensus-review/SKILL.md)"
+echo "  - agent: claude-worker, codex-worker, gemini-worker ($CLAUDE_DIR/agents/)"
 echo "Restart Claude Code (or start a new session) to pick up the new skills/agents."

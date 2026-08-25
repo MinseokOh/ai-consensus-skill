@@ -9,10 +9,12 @@ One model reviewing its own work tends to agree with itself. Three models that f
 | Type | Name | What it does |
 |---|---|---|
 | Skill | `consensus` | Round-based consensus loop for decisions (architecture, library choice, irreversible work) and a 2-track cross-review workflow for code writing |
-| Skill | `multi-review` | Runs every `*-reviewer` agent in parallel on the same diff and aggregates the findings into one deduplicated, severity-sorted report |
-| Agent | `claude-reviewer` | Claude reviews the diff directly, in a context independent from the one that wrote the code |
-| Agent | `codex-reviewer` | Drives `codex exec --sandbox read-only` and returns Codex's findings |
-| Agent | `gemini-reviewer` | Drives the Antigravity CLI (`agy --mode plan`) and returns Gemini's findings |
+| Skill | `consensus-review` | Runs every `*-worker` agent in parallel with the same review prompt and aggregates the findings into one deduplicated, severity-sorted report |
+| Agent | `claude-worker` | Claude answers the given prompt in a context independent from the one that wrote the code |
+| Agent | `codex-worker` | Relays the given prompt to `codex exec -s read-only` and returns Codex's answer |
+| Agent | `gemini-worker` | Relays the given prompt to the Antigravity CLI (`agy --mode plan`) and returns Gemini's answer |
+
+The agents follow a **worker pattern**: each is a thin, generic relay that executes an arbitrary prompt read-only and returns the answer as data. What to ask — a decision question, a code review, a rebuttal — is composed entirely by the skills. This keeps every external query visible as a named subagent task in Claude Code UIs, and adding a new model means adding one small worker file (plus a one-line registration in the `consensus` participants table).
 
 ## Installation
 
@@ -26,13 +28,13 @@ This downloads the skills and agents from this repo's raw paths into `~/.claude/
 
 ```
 ~/.claude/skills/consensus/SKILL.md
-~/.claude/skills/multi-review/SKILL.md
-~/.claude/agents/claude-reviewer.md
-~/.claude/agents/codex-reviewer.md
-~/.claude/agents/gemini-reviewer.md
+~/.claude/skills/consensus-review/SKILL.md
+~/.claude/agents/claude-worker.md
+~/.claude/agents/codex-worker.md
+~/.claude/agents/gemini-worker.md
 ```
 
-The installer is safe to re-run — existing files are backed up as `<file>.bak.<timestamp>` before being replaced. Restart Claude Code (or start a new session) afterwards to pick up the new skills and agents.
+The installer is safe to re-run — existing files are backed up as `<file>.bak.<timestamp>` before being replaced, and agent files superseded by newer releases (e.g., the old `*-reviewer` agents) are retired the same way. Restart Claude Code (or start a new session) afterwards to pick up the new skills and agents.
 
 Options via environment variables:
 
@@ -43,7 +45,8 @@ Options via environment variables:
 
 ```bash
 # Example: install a specific tag into a custom location
-CLAUDE_DIR=/path/to/.claude REF=v1.0.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/main/install.sh)"
+# (fetch the installer from the same tag — its file list must match that ref)
+curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/v1.0.1/install.sh | CLAUDE_DIR=/path/to/.claude REF=v1.0.1 bash
 ```
 
 ### Versioning
@@ -53,7 +56,7 @@ Releases follow [Semantic Versioning](https://semver.org) and are published as g
 - The default install tracks `main` (latest). For a **reproducible, pinned install**, fetch the installer from the tag *and* pass the same tag as `REF`:
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/v1.0.0/install.sh | REF=v1.0.0 bash
+  curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/v1.0.1/install.sh | REF=v1.0.1 bash
   ```
 
   (Note: with the `curl | bash` form, `REF` must be set on the `bash` side of the pipe — `REF=v1.0.0 curl ... | bash` would only apply it to `curl`. The recorded version equals a release only when `REF` is a tag; on `main` it reflects the `VERSION` file at install time, which may be ahead of the last tag.)
@@ -99,14 +102,14 @@ For non-trivial code, Claude doesn't finalize alone:
 - **Standard Track** (default): Claude drafts → all reviewers analyze independently in parallel (Claude's own review runs in a *separate* subagent context, since the context that wrote the code is anchored to it) → one rebuttal round with verbatim cross-quotes → moderator rules on each finding (evidence gate for disputed facts) → project linter/type checker/tests run as mandatory verification → a final approval pass only if the aggregated changes were large.
 - **Critical Track** (algorithms, financial calculations, parsing, security, concurrency, data-loss risk): every agent writes an **independent implementation** of the same spec first; divergences are settled by tests where possible; the synthesized final version then goes through the Standard Track review.
 
-### `multi-review` — pre-commit/PR cross-review
+### `consensus-review` — pre-commit/PR cross-review
 
 ```
-/multi-review                      # current branch vs main
-/multi-review main...feature-x     # explicit diff scope
+/consensus-review                      # current branch vs main
+/consensus-review main...feature-x     # explicit diff scope
 ```
 
-All `*-reviewer` agents run concurrently on the same diff. Results are merged (same file + same issue → one row, all discovering workers credited), sorted by severity, and suspicious findings are checked against the actual code before reporting so obvious false positives are dropped.
+All `*-worker` agents run concurrently with the same review prompt on the same diff. Results are merged (same file + same issue → one row, all discovering workers credited), sorted by severity, and suspicious findings are checked against the actual code before reporting so obvious false positives are dropped.
 
 ## Design principles
 
@@ -118,14 +121,7 @@ All `*-reviewer` agents run concurrently on the same diff. Results are merged (s
 
 ## Extending
 
-**Add a new external agent to `consensus`:** register its non-interactive, read-only invocation in the participating-agents table at the top of `skills/consensus/SKILL.md`. The workflow itself is participant-count agnostic.
-
-**Add a new review worker to `multi-review`:** drop a `{model}-reviewer.md` into `~/.claude/agents/`. Any agent whose name ends in `-reviewer` is picked up automatically — the skill file needs no changes. Use an existing reviewer as a template; the contract is simply to return findings as:
-
-```
-[<Model> review results]
-- {file}:{line} | {severity} | {description}
-```
+**Add a new model:** drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the given prompt to that model's CLI read-only and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
 
 ## Repository layout
 
@@ -133,11 +129,11 @@ All `*-reviewer` agents run concurrently on the same diff. Results are merged (s
 .claude/
   skills/
     consensus/SKILL.md      # decision consensus + 2-track code workflow
-    multi-review/SKILL.md   # parallel multi-model diff review
+    consensus-review/SKILL.md  # parallel multi-model diff review
   agents/
-    claude-reviewer.md
-    codex-reviewer.md
-    gemini-reviewer.md
+    claude-worker.md
+    codex-worker.md
+    gemini-worker.md
 install.sh                  # raw-path based installer
 VERSION                     # current version (single line, semver)
 CHANGELOG.md                # release history
