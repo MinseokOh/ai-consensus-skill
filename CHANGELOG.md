@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-25
+
+### Added
+
+- **Auto-update**: `scripts/ai-consensus-check-update.sh`, run from a Claude Code `SessionStart` hook, checks the remote `VERSION` on `main` at most once a day (3s network cap, silent on failure) and prints an update notice into the session context when it differs from the installed version. `export AI_CONSENSUS_AUTO_UPDATE=1` makes it install the new release automatically instead, pinned to that release's tag; `AI_CONSENSUS_UPDATE_INTERVAL` (seconds) tunes the check frequency, `0` disables it. Installs pinned to a non-release ref are never checked.
+- `install.sh` installs the check script and registers the `SessionStart` hook in `$CLAUDE_DIR/settings.json` (idempotent, JSON-merged via python3 with a backup and an atomic write; prints manual instructions if python3 is missing or the file is invalid). File replacement in phase 2 is now an atomic same-directory rename.
+
 ## [1.0.2] - 2026-08-25
 
 ### Changed
@@ -34,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.sh`: raw-path based installer with `CLAUDE_DIR` / `REF` overrides, timestamped backups, and external CLI dependency checks.
 - Version management: `VERSION` file, this changelog, and semver git tags; the installer reports and records the installed version.
 
+[1.1.0]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.1.0
 [1.0.2]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.2
 [1.0.1]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.1
 [1.0.0]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.0

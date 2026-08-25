@@ -32,6 +32,7 @@ This downloads the skills and agents from this repo's raw paths into `~/.claude/
 ~/.claude/agents/claude-worker.md
 ~/.claude/agents/codex-worker.md
 ~/.claude/agents/gemini-worker.md
+~/.claude/scripts/ai-consensus-check-update.sh
 ```
 
 The installer is safe to re-run — files being replaced are backed up as `<file>.bak.<timestamp>`, and files superseded by newer releases (e.g., the old `multi-review` skill and `*-reviewer` agents, including their leftover backups) are deleted on update — recursively and permanently. Restart Claude Code (or start a new session) afterwards to pick up the new skills and agents.
@@ -66,6 +67,15 @@ Releases follow [Semantic Versioning](https://semver.org) and are published as g
   ```bash
   cat ~/.claude/.ai-consensus-skill.version
   ```
+
+### Auto-update
+
+The installer registers a Claude Code `SessionStart` hook that runs `~/.claude/scripts/ai-consensus-check-update.sh`. At most once a day it compares your installed version against `VERSION` on `main` (3-second network cap; silent when offline or up to date) and, when the versions differ, prints an update notice into the session so Claude can offer to update.
+
+- **Automatic installs**: `export AI_CONSENSUS_AUTO_UPDATE=1` in your shell profile makes the hook run the installer itself instead of just notifying. It installs from the release tag matching the advertised version (not the moving tip of `main`), so what executes is exactly the compared release. Note this still executes remotely fetched code automatically — only opt in if you trust the repo.
+- **Check frequency**: `AI_CONSENSUS_UPDATE_INTERVAL` (seconds, default `86400`); **`0` disables checks entirely** (an opt-out that survives reinstalls, unlike editing `settings.json`).
+- **Pinned installs**: an install whose recorded `ref` is neither `main` nor a `vX.Y.Z` tag (a branch or commit pin) is treated as deliberate and never checked or auto-updated.
+- **Removing the hook**: delete its entry from `~/.claude/settings.json` (the installer backs the file up before touching it, skips registration if the hook is already present, and writes atomically). A later reinstall re-registers it — use `AI_CONSENSUS_UPDATE_INTERVAL=0` for a persistent opt-out.
 
 ### Requirements
 
