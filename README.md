@@ -46,6 +46,24 @@ Options via environment variables:
 CLAUDE_DIR=/path/to/.claude REF=v1.0.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/main/install.sh)"
 ```
 
+### Versioning
+
+Releases follow [Semantic Versioning](https://semver.org) and are published as git tags (`v1.0.0`, …), with changes documented in [CHANGELOG.md](CHANGELOG.md). The repo's current version lives in the [`VERSION`](VERSION) file.
+
+- The default install tracks `main` (latest). For a **reproducible, pinned install**, fetch the installer from the tag *and* pass the same tag as `REF`:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/v1.0.0/install.sh | REF=v1.0.0 bash
+  ```
+
+  (Note: with the `curl | bash` form, `REF` must be set on the `bash` side of the pipe — `REF=v1.0.0 curl ... | bash` would only apply it to `curl`. The recorded version equals a release only when `REF` is a tag; on `main` it reflects the `VERSION` file at install time, which may be ahead of the last tag.)
+
+- The installer prints the version it installed and records it to `$CLAUDE_DIR/.ai-consensus-skill.version` (version, ref, timestamp), so you can always check what you're running:
+
+  ```bash
+  cat ~/.claude/.ai-consensus-skill.version
+  ```
+
 ### Requirements
 
 - **Claude Code** — the skills/agents are loaded from `~/.claude`.
@@ -121,6 +139,8 @@ All `*-reviewer` agents run concurrently on the same diff. Results are merged (s
     codex-reviewer.md
     gemini-reviewer.md
 install.sh                  # raw-path based installer
+VERSION                     # current version (single line, semver)
+CHANGELOG.md                # release history
 ```
 
 The repo mirrors the `~/.claude` layout, so you can also install manually by copying `.claude/` over your own, or vendor it per-project.
