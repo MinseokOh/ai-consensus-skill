@@ -10,7 +10,8 @@
 #   CLAUDE_DIR  install target (default: ~/.claude)
 #   REF         git ref to install from (default: main)
 #
-# Safe to re-run: existing files are backed up as <file>.bak.<timestamp>.
+# Safe to re-run: files being replaced are backed up as <file>.bak.<timestamp>;
+# files superseded by newer releases (old skills/agents) are deleted.
 # All files are downloaded to a staging dir first and installed only if
 # every download succeeds, so a failed download never leaves a partial
 # install.
@@ -24,6 +25,10 @@ RAW_BASE="https://raw.githubusercontent.com/$REPO/$REF"
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
+case "$CLAUDE_DIR" in
+  ""|"/") echo "ERROR: refusing to install into CLAUDE_DIR='$CLAUDE_DIR'" >&2; exit 1;;
+esac
+
 FILES=(
   ".claude/skills/consensus/SKILL.md"
   ".claude/skills/consensus-review/SKILL.md"
@@ -32,11 +37,12 @@ FILES=(
   ".claude/agents/gemini-worker.md"
 )
 
-# Files from older releases that this version supersedes; retired (backed up)
-# on install. Note: paths here are relative to $CLAUDE_DIR, while FILES above
-# are repo-relative (their leading ".claude/" is stripped on install).
-OBSOLETE_FILES=(
-  "skills/multi-review/SKILL.md"
+# Paths from older releases that this version supersedes; DELETED on install
+# (including any leftover backups inside a superseded skill directory).
+# Note: paths here are relative to $CLAUDE_DIR, while FILES above are
+# repo-relative (their leading ".claude/" is stripped on install).
+OBSOLETE_PATHS=(
+  "skills/multi-review"
   "agents/claude-reviewer.md"
   "agents/codex-reviewer.md"
   "agents/gemini-reviewer.md"
@@ -79,12 +85,24 @@ for repo_path in "${FILES[@]}"; do
   echo "  installed: $dest"
 done
 
-for rel in "${OBSOLETE_FILES[@]}"; do
+for rel in "${OBSOLETE_PATHS[@]}"; do
+  case "$rel" in ""|/*|*..*) echo "  warning: skipping unsafe obsolete path '$rel'" >&2; continue;; esac
   obsolete="$CLAUDE_DIR/$rel"
-  if [ -f "$obsolete" ]; then
-    mv "$obsolete" "$obsolete.bak.$STAMP"
-    echo "  retired: $obsolete -> $obsolete.bak.$STAMP"
+  if [ -e "$obsolete" ] || [ -L "$obsolete" ]; then
+    if rm -rf "$obsolete"; then
+      echo "  removed obsolete: $obsolete"
+    else
+      echo "  warning: could not remove obsolete path $obsolete" >&2
+    fi
   fi
+done
+
+# Sweep backups of superseded files left behind by older installers.
+for bak in "$CLAUDE_DIR"/agents/claude-reviewer.md.bak.* \
+           "$CLAUDE_DIR"/agents/codex-reviewer.md.bak.* \
+           "$CLAUDE_DIR"/agents/gemini-reviewer.md.bak.*; do
+  [ -e "$bak" ] || continue
+  rm -f "$bak" && echo "  removed obsolete: $bak"
 done
 
 printf 'version=%s\nref=%s\ninstalled=%s\n' "$VERSION" "$REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

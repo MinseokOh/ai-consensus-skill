@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-08-25
+
+### Changed
+
+- `install.sh`: paths superseded by newer releases (the old `multi-review` skill directory and `*-reviewer` agents, plus `.bak.*` leftovers earlier installers made of them) are now **deleted** on update instead of being renamed to `.bak.<timestamp>`. Backups are still made for current files being replaced. The deletion is guarded (refuses `CLAUDE_DIR=/` or empty, unsafe relative paths, and continues with a warning if a removal fails).
+
 ## [1.0.1] - 2026-08-25
 
 ### Changed
@@ -28,5 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.sh`: raw-path based installer with `CLAUDE_DIR` / `REF` overrides, timestamped backups, and external CLI dependency checks.
 - Version management: `VERSION` file, this changelog, and semver git tags; the installer reports and records the installed version.
 
+[1.0.2]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.2
 [1.0.1]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.1
 [1.0.0]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.0

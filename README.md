@@ -34,7 +34,7 @@ This downloads the skills and agents from this repo's raw paths into `~/.claude/
 ~/.claude/agents/gemini-worker.md
 ```
 
-The installer is safe to re-run — existing files are backed up as `<file>.bak.<timestamp>` before being replaced, and agent files superseded by newer releases (e.g., the old `*-reviewer` agents) are retired the same way. Restart Claude Code (or start a new session) afterwards to pick up the new skills and agents.
+The installer is safe to re-run — files being replaced are backed up as `<file>.bak.<timestamp>`, and files superseded by newer releases (e.g., the old `multi-review` skill and `*-reviewer` agents, including their leftover backups) are deleted on update — recursively and permanently. Restart Claude Code (or start a new session) afterwards to pick up the new skills and agents.
 
 Options via environment variables:
 
