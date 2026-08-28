@@ -10,7 +10,7 @@ One model reviewing its own work tends to agree with itself. Three models that f
 |---|---|---|
 | Skill | `consensus` | Round-based consensus loop for decisions (architecture, library choice, irreversible work) and a 2-track cross-review workflow for code writing |
 | Skill | `consensus-review` | Runs every `*-worker` agent in parallel with the same review prompt and aggregates the findings into one deduplicated, severity-sorted report |
-| Agent | `claude-worker` | Claude answers the given prompt in a context independent from the one that wrote the code |
+| Agent | `claude-worker` | Claude answers the given prompt in a context independent from the one that wrote the code (via a headless `claude -p --effort` session when a specific effort is requested) |
 | Agent | `codex-worker` | Relays the given prompt to `codex exec -s read-only` and returns Codex's answer |
 | Agent | `gemini-worker` | Relays the given prompt to the Antigravity CLI (`agy --mode plan`) and returns Gemini's answer |
 
@@ -79,7 +79,7 @@ The installer registers a Claude Code `SessionStart` hook that runs `~/.claude/s
 
 ### Requirements
 
-- **Claude Code** — the skills/agents are loaded from `~/.claude`.
+- **Claude Code** — the skills/agents are loaded from `~/.claude`; also invoked headlessly (`claude -p --permission-mode plan`) when the Claude seat runs at a requested effort.
 - **[Codex CLI](https://github.com/openai/codex)** (`codex`) — logged in. Used via `codex exec -s read-only`.
 - **Antigravity CLI** (`agy`) — logged in with a Google account. Used via `agy --mode plan`. (Successor to the old `gemini-cli`, whose personal-account support was discontinued.)
 
@@ -121,17 +121,35 @@ For non-trivial code, Claude doesn't finalize alone:
 
 All `*-worker` agents run concurrently with the same review prompt on the same diff. Results are merged (same file + same issue → one row, all discovering workers credited), sorted by severity, and suspicious findings are checked against the actual code before reporting so obvious false positives are dropped.
 
+### Reasoning effort
+
+Review depth is a decision, not an accident of whichever defaults each CLI happens to carry. One effort level is chosen per run and handed to every worker, which maps it to its own engine's flag:
+
+```
+/consensus-review --effort high
+/consensus-review --effort max main...feature-x
+```
+
+Without the flag, `consensus-review` picks the level from the diff itself — `high` for security, concurrency, money, or migration/deletion changes (and large diffs), `low` for docs- or formatting-only churn, `medium` otherwise. `xhigh` and `max` are never chosen automatically; they only come from an explicit flag.
+
+| Level | Claude (`claude -p --effort`) | Codex (`-c model_reasoning_effort=`) | Gemini (`agy --effort`) |
+|---|---|---|---|
+| `low` / `medium` / `high` | yes | yes | yes |
+| `xhigh` / `max` | yes | yes | capped to `high` |
+
+Each worker reports the level it actually ran at (`[Codex effort=xhigh]`), and the report's summary line records it — including any worker that had to cap, so a run labeled `max` never quietly means something shallower.
+
 ## Design principles
 
 - **Independence first.** Round 1 opinions are formed blind. Cross-round quotes are verbatim, never paraphrased — summaries distort and anchor.
 - **Evidence beats debate.** Anything verifiable is verified, not argued. Model headcount does not guarantee correctness; models can share biases.
-- **External agents never touch your files.** All invocations are read-only (`codex -s read-only`, `agy --mode plan`). Claude alone writes files and runs code/tests.
+- **External agents never touch your files.** All invocations are read-only (`codex -s read-only`, `agy --mode plan`, and the headless Claude seat's `--permission-mode plan` with a read-only allow-list). Claude alone writes files and runs code/tests.
 - **Bounded cost.** Rebuttals are capped (2 for decisions, 1 for code review). Trivial changes (renames, typos, one-liners) skip the workflow entirely.
 - **Failures are loud.** A failed agent is excluded and reported — never silently dropped, never guessed for.
 
 ## Extending
 
-**Add a new model:** drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the given prompt to that model's CLI read-only and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
+**Add a new model:** drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the given prompt to that model's CLI read-only and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error), mapping an `Effort: <level>` directive onto that CLI's own flag (or ignoring it, if the engine has none). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
 
 ## Repository layout
 

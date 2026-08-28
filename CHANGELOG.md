@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-26
+
+### Added
+
+- **Per-run reasoning effort**: the invoking model picks one effort level per run and passes it to every worker as a worker-directed `Effort: <low|medium|high|xhigh|max>` line, separate from the task prompt; each worker maps it onto its own engine (`claude -p --effort`, `codex exec -c model_reasoning_effort=`, `agy --effort`). With no directive every engine keeps its current default, so existing behavior is unchanged.
+- `consensus-review`: accepts an explicit `--effort <level>` argument, and otherwise derives the level from the diff — `high` for security/auth/crypto, concurrency/transaction, money, or migration/deletion changes and large diffs (>15 files or >500 lines), `low` for docs- or generated-file-only churn, `medium` otherwise. `xhigh`/`max` are never chosen automatically. The chosen level is announced before the run and recorded in the report's summary line.
+- Workers report the level they actually ran at in their source bracket (`[<Model> effort=<level>]`), so a capped or degraded run is visible instead of being read as the requested level.
+
+### Changed
+
+- `claude-worker`: gained an effort mode. A subagent cannot change its own reasoning effort, so when an effort level is requested the worker relays the task to a headless `claude -p "<prompt>" --effort <level> --safe-mode --permission-mode plan` session with a read-only allow-list and `--disallowed-tools "Agent,Task,Skill"`, and returns its answer; if that run fails it falls back to answering in-process and labels the result `effort=inherited`. Without a directive it answers directly, as before.
+  - `--safe-mode` is load-bearing: it keeps the headless session from running the user's hooks (a `SessionStart` auto-update hook could rewrite the worker files mid-review), from starting MCP servers, and from loading the project's own skills/agents — which the relayed review prompt could otherwise re-trigger into a recursive fan-out of workers. `--bare` is not a substitute: it never reads OAuth or the keychain. The file also records that the git allow-list is prefix-matched (`git diff --output=<file>` writes, `--ext-diff` executes), that the reviewed diff is untrusted input, and that CLI banner/stderr text must be stripped rather than returned as an answer.
+- `codex-worker` / `gemini-worker`: document the effort flag for their engine. Codex accepts all five levels (an unsupported value comes back as an API 400); agy supports only `low|medium|high`, so `xhigh`/`max` run there as `high` and are reported as `high`.
+- Timeouts are now budgeted per level instead of a flat ~120s (measured on a ~50-line diff: ~35-70s at `low`, ~8 minutes for the headless Claude seat at `xhigh`), and the no-worker fallbacks map `xhigh`/`max` down to `high` for agy the same way the worker does.
+- `consensus`: the participants table, the no-worker fallback commands, and Cautions now cover the effort directive — including the rule that every participant in a round runs at the same level, and that a round labeled `max` is not `max` for Gemini.
+
 ## [1.1.0] - 2026-08-25
 
 ### Added
@@ -41,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.sh`: raw-path based installer with `CLAUDE_DIR` / `REF` overrides, timestamped backups, and external CLI dependency checks.
 - Version management: `VERSION` file, this changelog, and semver git tags; the installer reports and records the installed version.
 
+[1.2.0]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.2.0
 [1.1.0]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.1.0
 [1.0.2]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.2
 [1.0.1]: https://github.com/MinseokOh/ai-consensus-skill/releases/tag/v1.0.1
