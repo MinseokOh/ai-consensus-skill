@@ -13,7 +13,7 @@
 # Options (each also accepts the --opt=value form):
 #   --effort <low|medium|high|xhigh|max>  requested reasoning effort
 #   --cwd <dir>                           run the engine here (repo context)
-#   --timeout <seconds>                   override the effort-derived budget
+#   --timeout <seconds>                   override the default 600-second budget
 #   -h | --help
 #
 # Output on stdout, exactly one block and nothing else:
@@ -143,6 +143,10 @@ fail() {
   exit 1
 }
 
+# Every supported delegation path uses this adapter. Children inherit the marker,
+# so an accidentally re-invoked skill cannot fan out another paid review round.
+[ "${AI_CONSENSUS_WORKER_ACTIVE:-0}" != "1" ] || fail "nested consensus worker invocation refused"
+
 # --------------------------------------------------------- effort & budget --
 
 # Each engine takes the requested level as far as it can and reports what it
@@ -152,15 +156,10 @@ if [ "$ENGINE" = "gemini" ]; then
   case "$EFFORT" in xhigh|max) EFFORT_ACTUAL="high";; esac
 fi
 
-# Budget by effort, not a flat number: raising the effort and then cutting the
-# run off at 120s is the opposite of what raising it was for. Gemini's budget
-# follows the capped level, so xhigh/max there is a `high` run at 180s.
+# One default budget for every engine and effort level. An explicit --timeout
+# overrides it; retries still share the same deadline.
 if [ -z "$TIMEOUT" ]; then
-  case "$EFFORT_ACTUAL" in
-    ""|low|medium) TIMEOUT=120;;
-    high)          TIMEOUT=180;;
-    xhigh|max)     if [ "$ENGINE" = "claude" ]; then TIMEOUT=600; else TIMEOUT=300; fi;;
-  esac
+  TIMEOUT=600
 fi
 
 command -v "$BIN" >/dev/null 2>&1 || fail "$BIN CLI not found on PATH"
@@ -262,7 +261,7 @@ run_claude() {
   [ -n "$EFFORT_ACTUAL" ] && args+=( --effort "$EFFORT_ACTUAL" )
   cd "$CWD" || exit 127
   # Prompt on stdin: --allowed-tools is variadic and swallows a trailing positional.
-  claude "${args[@]}" < "$SEND" > "$RAW" 2> "$ERR"
+  AI_CONSENSUS_WORKER_ACTIVE=1 claude "${args[@]}" < "$SEND" > "$RAW" 2> "$ERR"
 }
 
 # `set -m` is inherited by the subshell this runs in, which would make the engine
@@ -277,7 +276,7 @@ run_codex() {
   [ -n "$level" ] && args+=( -c "model_reasoning_effort=$level" )
   cd "$CWD" || exit 127
   : > "$LAST"   # never let a previous attempt's answer survive into this one
-  codex "${args[@]}" < "$SEND" > "$RAW" 2> "$ERR"
+  AI_CONSENSUS_WORKER_ACTIVE=1 codex "${args[@]}" < "$SEND" > "$RAW" 2> "$ERR"
 }
 
 # `set -m` is inherited by the subshell this runs in, which would make the engine
@@ -286,13 +285,13 @@ run_codex() {
 # subshell's group.
 run_gemini() {
   set +m
-  local args=( --mode plan )
+  local args=( --mode plan --print-timeout "$(remaining)s" )
   [ -n "$EFFORT_ACTUAL" ] && args+=( --effort "$EFFORT_ACTUAL" )
   cd "$CWD" || exit 127
   # </dev/null: a background process group that reads the terminal gets SIGTTIN
   # and stops, and a stopped process still answers kill -0 — it would burn the
   # whole budget and be reported as a timeout it never hit.
-  agy -p "$(cat "$SEND")" "${args[@]}" < /dev/null > "$RAW" 2> "$ERR"
+  AI_CONSENSUS_WORKER_ACTIVE=1 agy -p "$(cat "$SEND")" "${args[@]}" < /dev/null > "$RAW" 2> "$ERR"
 }
 
 # Reaping a job under `set -m` makes bash announce "[1]+ Terminated: 15" on its

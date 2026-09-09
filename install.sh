@@ -4,7 +4,7 @@
 #
 # Claude Code target: the two skills plus the worker agents (claude-worker,
 # codex-worker, gemini-worker) into ~/.claude.
-# Codex target: the two skills plus the shared engine runner
+# Both targets include the same engine runner. Codex target: the two skills plus the runner
 # (skills/consensus/scripts/worker.sh) into $CODEX_HOME (~/.codex). Codex has no
 # user-definable subagents, so the workers ship as that runner instead.
 #
@@ -42,7 +42,7 @@ RAW_BASE="https://raw.githubusercontent.com/$REPO/$REF"
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 CODEX_DIR="${CODEX_DIR:-${CODEX_HOME:-$HOME/.codex}}"
 TARGET="${TARGET:-claude}"
-STAMP="$(date +%Y%m%d%H%M%S)"
+STAMP="$(date +%Y%m%d%H%M%S).$$"
 
 # Printed literally: `curl … | bash -s -- --help` makes $0 the bash binary, so
 # anything that reads $0 for its own comments fails there.
@@ -66,8 +66,8 @@ Environment:
   CODEX_DIR   Codex install target  (default: $CODEX_HOME, else ~/.codex)
   REF         git ref to install from (default: main)
 
-Claude Code gets the two skills plus the worker agents; Codex gets the two skills
-plus the shared engine runner (skills/consensus/scripts/worker.sh), since Codex has
+Both targets get the two skills and shared engine runner (skills/consensus/scripts/worker.sh).
+Claude Code also gets named worker agents that relay through that runner; Codex has
 no user-definable subagents. Only the Claude target registers a hook; the Codex
 target never touches config.toml or AGENTS.md.
 USAGE
@@ -164,7 +164,40 @@ CLAUDE_OBSOLETE_PATHS=(
 )
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+INSTALL_LOCKS=()
+cleanup() {
+  local lock
+  for lock in ${INSTALL_LOCKS[@]+"${INSTALL_LOCKS[@]}"}; do rmdir "$lock" 2>/dev/null || true; done
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+# Fail fast: acquire every requested target before publishing any payload. mkdir
+# is atomic on macOS as well as Linux; never remove a lock owned by another run.
+# A SIGKILL can leave an empty lock directory. Do not guess that it is stale.
+lock_target() {
+  local root="$1" lock lock_signal=0 lock_failed=0
+  mkdir -p "$root"
+  lock="$root/.ai-consensus-skill.install-lock"
+  # Defer a handled signal until ownership is recorded. Otherwise a signal just
+  # after mkdir succeeds can leave a lock that cleanup does not yet know about.
+  trap 'lock_signal=130' INT
+  trap 'lock_signal=143' TERM HUP
+  if mkdir "$lock" 2>/dev/null; then
+    INSTALL_LOCKS+=("$lock")
+  else
+    lock_failed=1
+  fi
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  [ "$lock_signal" -eq 0 ] || exit "$lock_signal"
+  if [ "$lock_failed" -eq 1 ]; then
+    echo "ERROR: install target is locked: $lock. Retry after the other installer exits; if it was killed, remove the empty lock only after confirming no installer is running." >&2
+    exit 1
+  fi
+}
 
 VERSION="$(curl -fsSL "$RAW_BASE/VERSION" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
 VERSION="${VERSION#v}"
@@ -192,6 +225,8 @@ download_files() {
       echo "  ERROR: failed to download $RAW_BASE/$repo_path — nothing was installed" >&2
       exit 1
     fi
+    # Permissions travel with the staged inode; never publish an unusable runner.
+    case "$rel" in *.sh) chmod 755 "$tmp";; esac
   done
 }
 
@@ -233,20 +268,46 @@ remove_obsolete() {
 
 stamp_version() {
   printf 'version=%s\nref=%s\ninstalled=%s\n' "$VERSION" "$REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    > "$1/.ai-consensus-skill.version"
+    > "$1/.ai-consensus-skill.version.tmp.$$"
+  mv -f "$1/.ai-consensus-skill.version.tmp.$$" "$1/.ai-consensus-skill.version"
 }
 
 if [ "$WANT_CLAUDE" = "1" ]; then download_files claude "${CLAUDE_FILES[@]}"; fi
 if [ "$WANT_CODEX" = "1" ];  then download_files codex  "${CODEX_FILES[@]}";  fi
+
+# Both hosts use the same source implementation. The repository's Claude path
+# is a symlink; raw GitHub downloads do not dereference symlinks.
+if [ "$WANT_CLAUDE" = "1" ]; then
+  shared_rel="skills/consensus/scripts/worker.sh"
+  mkdir -p "$TMP_DIR/claude/skills/consensus/scripts"
+  if [ "$WANT_CODEX" = "1" ]; then
+    cp "$TMP_DIR/codex/$shared_rel" "$TMP_DIR/claude/$shared_rel"
+  else
+    curl -fsSL "$RAW_BASE/.codex/$shared_rel" -o "$TMP_DIR/claude/$shared_rel"
+  fi
+  chmod 755 "$TMP_DIR/claude/$shared_rel"
+  CLAUDE_FILES+=(".claude/$shared_rel")
+fi
+
+if [ "$WANT_CLAUDE" = "1" ]; then lock_target "$CLAUDE_DIR"; fi
+if [ "$WANT_CODEX" = "1" ]; then lock_target "$CODEX_DIR"; fi
+
+# The update hook observed this stamp before its network check. A manual install
+# may have changed (or pinned) the target since then. Check while holding the
+# publication lock, so an automatic update cannot overwrite that newer choice.
+if [ "${AI_CONSENSUS_EXPECTED_CLAUDE_STATE+x}" = "x" ]; then
+  if [ "$TARGET" != "claude" ] || [ ! -f "$CLAUDE_DIR/.ai-consensus-skill.version" ] || \
+     [ "$(cat "$CLAUDE_DIR/.ai-consensus-skill.version" 2>/dev/null)" != "$AI_CONSENSUS_EXPECTED_CLAUDE_STATE" ]; then
+    echo "Skipped automatic update: installed state changed during the update check." >&2
+    exit 75
+  fi
+fi
 
 if [ "$WANT_CLAUDE" = "1" ]; then
   echo ""
   echo "Claude Code -> $CLAUDE_DIR"
   mkdir -p "$CLAUDE_DIR"
   install_files claude "$CLAUDE_DIR" "${CLAUDE_FILES[@]}"
-
-  chmod +x "$CLAUDE_DIR/scripts/ai-consensus-check-update.sh" \
-    || echo "  warning: could not chmod +x $CLAUDE_DIR/scripts/ai-consensus-check-update.sh" >&2
 
   # Register the SessionStart update-check hook in settings.json (idempotent;
   # backs the file up before modifying). Skipped with instructions if python3
@@ -273,7 +334,7 @@ session_start = hooks.setdefault("SessionStart", [])
 if not isinstance(session_start, list):
     sys.exit(1)
 session_start.append({"hooks": [{"type": "command", "command": cmd}]})
-tmp = path + ".tmp"
+tmp = path + ".tmp." + str(os.getpid())
 with open(tmp, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
@@ -310,9 +371,6 @@ if [ "$WANT_CODEX" = "1" ]; then
   mkdir -p "$CODEX_DIR"
   install_files codex "$CODEX_DIR" "${CODEX_FILES[@]}"
 
-  chmod +x "$CODEX_DIR/skills/consensus/scripts/worker.sh" \
-    || echo "  warning: could not chmod +x $CODEX_DIR/skills/consensus/scripts/worker.sh" >&2
-
   stamp_version "$CODEX_DIR"
 fi
 
@@ -344,6 +402,7 @@ if [ "$WANT_CLAUDE" = "1" ]; then
   echo "  Claude Code ($CLAUDE_DIR)"
   echo "    - skill: consensus, consensus-review  ($CLAUDE_DIR/skills/)"
   echo "    - agent: claude-worker, codex-worker, gemini-worker  ($CLAUDE_DIR/agents/)"
+  echo "    - runner: worker.sh  ($CLAUDE_DIR/skills/consensus/scripts/worker.sh)"
   echo "    - auto-update: daily check at session start ($CLAUDE_DIR/scripts/ai-consensus-check-update.sh; notice only — export AI_CONSENSUS_AUTO_UPDATE=1 to install updates automatically)"
 fi
 if [ "$WANT_CODEX" = "1" ]; then
