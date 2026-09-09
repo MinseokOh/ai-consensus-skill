@@ -1,0 +1,6 @@
+interface:
+  display_name: "Consensus"
+  short_description: "Decide with independent external agents"
+  default_prompt: "Use $consensus to decide between these approaches with Claude and Gemini weighing in."
+policy:
+  allow_implicit_invocation: true

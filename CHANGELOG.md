@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-09
+
+### Added
+
+- **Codex CLI target**: the `consensus` and `consensus-review` skills now ship for Codex under `.codex/`, installed into `$CODEX_HOME` (default `~/.codex`) with `install.sh --target codex` (or `--target both`). Codex also discovers a project-local `.codex/skills/`, so the payload can be vendored per-repo instead of installed globally.
+- `.codex/skills/consensus/scripts/worker.sh` — the engine adapter that replaces the three worker subagents, since Codex has no user-definable subagent mechanism. It runs one prompt on one engine (`claude -p`, `codex exec -s read-only`, `agy --mode plan`) as a fresh read-only OS process and prints exactly one normalized block: `[<Model> effort=<level>]` with the answer, or `[<Model> FAILED] <reason>`. A separate process supplies the same context isolation a subagent did — each engine starts from a fresh session and sees only the frozen prompt file.
+  - One deadline covers the whole call, so a retry draws from what is left of the budget rather than re-arming it; budgets stay 120s by default, 180s at `high`, 600s for Claude and 300s for Codex at `xhigh`/`max`, and 180s for Gemini, whose budget follows its capped level.
+  - Engine stderr is kept in a separate file and never becomes the answer; `codex exec` answers come from `--output-last-message`, and an empty final message on a zero exit is a failure rather than a fallback to the event log.
+  - `INT`/`TERM`/`HUP` traps kill each engine's process group (`set -m`) and remove the temp dir, so a cancelled round leaves no paid engine running; the shell's job-control notices are kept out of the answer block.
+  - Deterministic retries only: one step down from `xhigh`/`max` when Codex rejects the reasoning effort, and one retry when agy dies on its own `permission check failed`.
+- `.codex/skills/consensus/references/workers.md` — per-engine operating notes: transport limits, effort caps and timeout budgets, how to read a result, failure handling, adding an engine, and the direct-CLI commands to fall back on if the runner is missing.
+- `agents/openai.yaml` for both Codex skills (display name, short description, default prompt, implicit-invocation policy).
+
+### Changed
+
+- `install.sh` takes `--target claude|codex|both` (default `claude`, so existing one-line installs are unchanged) and a `CODEX_DIR` override. Downloads are staged per target and installed only if every download succeeds; the Codex target installs no hook and never touches `config.toml` or `AGENTS.md`. `--help` is now printed literally, so it works over the documented `curl … | bash -s -- --help` form where `$0` is the bash binary. An option given without a value, and a `--target both` where both roots resolve to the same directory, are rejected with a message instead of aborting mid-run. The dependency check now covers every CLI the selected target actually invokes and names the seat that would be lost.
+
+### Notes
+
+- On Codex the host session holds the Codex seat in decision mode and holds **no** seat in code mode — it drafts and moderates, while a fresh `codex exec` process takes the Codex reviewer seat, so the host and the worker are never counted as two seats.
+- `codex exec` has no equivalent of Claude's `--safe-mode` / `--disallowed-tools`: a delegated Codex seat still enumerates the installed skills and still runs the user's hooks (`--disable skill_search`, `--enable skip_host_skill_discovery` and `--disable multi_agent` were each tried and suppress none of it). The runner prepends a delegated-reviewer instruction to every Codex prompt; this is a behavioral mitigation, not enforcement.
+- The `.claude/` payload is unchanged by this release. The `SessionStart` auto-update hook therefore still updates only the Claude target; after a `--target both` install, re-run the installer with `--target codex` to update `$CODEX_DIR`.
+
 ## [1.2.0] - 2026-08-26
 
 ### Added

@@ -1,6 +1,6 @@
 # ai-consensus-skill
 
-Multi-agent consensus workflows for [Claude Code](https://claude.com/claude-code): before making important technical decisions or finalizing non-trivial code, Claude gathers **independent opinions from external CLI agents** (OpenAI Codex, Google Gemini), debates them in structured rounds, and only then commits to a result.
+Multi-agent consensus workflows for [Claude Code](https://claude.com/claude-code) **and [Codex CLI](https://github.com/openai/codex)**: before making important technical decisions or finalizing non-trivial code, the host agent gathers **independent opinions from the other CLI agents** (Claude, OpenAI Codex, Google Gemini), debates them in structured rounds, and only then commits to a result.
 
 One model reviewing its own work tends to agree with itself. Three models that formed their opinions *independently* — and then have to defend them against each other — catch what any one of them would miss.
 
@@ -13,6 +13,17 @@ One model reviewing its own work tends to agree with itself. Three models that f
 | Agent | `claude-worker` | Claude answers the given prompt in a context independent from the one that wrote the code (via a headless `claude -p --effort` session when a specific effort is requested) |
 | Agent | `codex-worker` | Relays the given prompt to `codex exec -s read-only` and returns Codex's answer |
 | Agent | `gemini-worker` | Relays the given prompt to the Antigravity CLI (`agy --mode plan`) and returns Gemini's answer |
+
+For **Codex CLI** the same two skills ship under `.codex/`, with one difference: Codex has no user-definable subagents, so the three worker agents are replaced by a single executable adapter.
+
+| Type | Name | What it does |
+|---|---|---|
+| Skill | `consensus` | Same workflow, with the host Codex session holding the Codex seat in decision mode and moderating (holding no seat) in code mode |
+| Skill | `consensus-review` | Same parallel diff review, launching each seat as a separate process |
+| Script | `scripts/worker.sh` | Runs one prompt on one engine (`claude -p` / `codex exec -s read-only` / `agy --mode plan`) as a fresh read-only OS process and prints one normalized `[<Model> effort=<level>]` block, or `[<Model> FAILED] <reason>` |
+| Reference | `references/workers.md` | Per-engine operating notes: transport limits, effort caps, timeout budgets, failure handling, and the direct-CLI fallback |
+
+A separate OS process gives the same context isolation a subagent does — each engine starts from a fresh session and sees only the frozen prompt file — and the runner keeps engine stderr out of the answer, traps `INT`/`TERM`/`HUP` so a cancelled round never leaves a paid engine running, and spends one deadline across any retry.
 
 The agents follow a **worker pattern**: each is a thin, generic relay that executes an arbitrary prompt read-only and returns the answer as data. What to ask — a decision question, a code review, a rebuttal — is composed entirely by the skills. This keeps every external query visible as a named subagent task in Claude Code UIs, and adding a new model means adding one small worker file (plus a one-line registration in the `consensus` participants table).
 
@@ -35,13 +46,34 @@ This downloads the skills and agents from this repo's raw paths into `~/.claude/
 ~/.claude/scripts/ai-consensus-check-update.sh
 ```
 
+For **Codex**, pass `--target codex` (or `--target both`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MinseokOh/ai-consensus-skill/main/install.sh | bash -s -- --target codex
+```
+
+which installs into `$CODEX_HOME` (default `~/.codex`):
+
+```
+~/.codex/skills/consensus/SKILL.md
+~/.codex/skills/consensus/agents/openai.yaml
+~/.codex/skills/consensus/references/workers.md
+~/.codex/skills/consensus/scripts/worker.sh
+~/.codex/skills/consensus-review/SKILL.md
+~/.codex/skills/consensus-review/agents/openai.yaml
+```
+
+The Codex target installs no hook and never touches `config.toml` or `AGENTS.md`. That also means the `SessionStart` auto-update hook (a Claude Code feature) only ever refreshes the Claude payload: after a `--target both` install, re-run the installer with `--target codex` to bring `$CODEX_DIR` up to the same version. Codex also discovers a project-local `.codex/skills/`, so you can vendor the two skill directories into a repo instead of installing them globally.
+
 The installer is safe to re-run — files being replaced are backed up as `<file>.bak.<timestamp>`, and files superseded by newer releases (e.g., the old `multi-review` skill and `*-reviewer` agents, including their leftover backups) are deleted on update — recursively and permanently. Restart Claude Code (or start a new session) afterwards to pick up the new skills and agents.
 
 Options via environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLAUDE_DIR` | `~/.claude` | Install target directory |
+| `TARGET` | `claude` | `claude`, `codex` or `both` (same as `--target`) |
+| `CLAUDE_DIR` | `~/.claude` | Claude install target directory |
+| `CODEX_DIR` | `$CODEX_HOME`, else `~/.codex` | Codex install target directory |
 | `REF` | `main` | Git ref (branch/tag) to install from |
 
 ```bash
@@ -79,11 +111,13 @@ The installer registers a Claude Code `SessionStart` hook that runs `~/.claude/s
 
 ### Requirements
 
-- **Claude Code** — the skills/agents are loaded from `~/.claude`; also invoked headlessly (`claude -p --permission-mode plan`) when the Claude seat runs at a requested effort.
+- **Claude Code** — the skills/agents are loaded from `~/.claude`; also invoked headlessly (`claude -p --permission-mode plan`) when the Claude seat runs at a requested effort. On the Codex target the Claude seat is always this headless invocation.
 - **[Codex CLI](https://github.com/openai/codex)** (`codex`) — logged in. Used via `codex exec -s read-only`.
 - **Antigravity CLI** (`agy`) — logged in with a Google account. Used via `agy --mode plan`. (Successor to the old `gemini-cli`, whose personal-account support was discontinued.)
 
-The external CLIs are *optional but recommended*: the workflows degrade gracefully. Any agent that fails (not installed, not logged in, spend cap, timeout) is reported and excluded, and the round continues with the remaining participants — down to Claude alone if necessary. The installer checks for both CLIs and warns if they are missing.
+The external CLIs are *optional but recommended*: the workflows degrade gracefully. Any agent that fails (not installed, not logged in, spend cap, timeout) is reported and excluded, and the round continues with the remaining participants — down to the host alone if necessary. The installer checks the CLIs each target actually invokes and names the seat that would be lost.
+
+On the Codex target one guard does not transfer: `codex exec` has no equivalent of Claude's `--safe-mode` / `--disallowed-tools`, so a delegated Codex seat still enumerates the installed skills and still runs the user's hooks. The runner prepends a delegated-reviewer instruction to every Codex prompt as a behavioral mitigation; see `references/workers.md` for what that does and does not cover.
 
 ## Usage
 
@@ -149,22 +183,35 @@ Each worker reports the level it actually ran at (`[Codex effort=xhigh]`), and t
 
 ## Extending
 
-**Add a new model:** drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the given prompt to that model's CLI read-only and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error), mapping an `Effort: <level>` directive onto that CLI's own flag (or ignoring it, if the engine has none). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
+**Add a new model (Codex target):** add a `run_<engine>` function and a `case` arm to `.codex/skills/consensus/scripts/worker.sh`, a row to the participants table in `.codex/skills/consensus/SKILL.md`, and the engine's name to `ENGINES` in `.codex/skills/consensus-review/SKILL.md`.
+
+**Add a new model (Claude target):** drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the given prompt to that model's CLI read-only and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error), mapping an `Effort: <level>` directive onto that CLI's own flag (or ignoring it, if the engine has none). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
 
 ## Repository layout
 
 ```
-.claude/
+.claude/                       # Claude Code payload (mirrors ~/.claude)
   skills/
-    consensus/SKILL.md      # decision consensus + 2-track code workflow
+    consensus/SKILL.md         # decision consensus + 2-track code workflow
     consensus-review/SKILL.md  # parallel multi-model diff review
   agents/
     claude-worker.md
     codex-worker.md
     gemini-worker.md
-install.sh                  # raw-path based installer
-VERSION                     # current version (single line, semver)
-CHANGELOG.md                # release history
+  scripts/ai-consensus-check-update.sh
+.codex/                        # Codex payload (mirrors $CODEX_HOME)
+  skills/
+    consensus/
+      SKILL.md
+      agents/openai.yaml
+      references/workers.md    # per-engine operating notes
+      scripts/worker.sh        # the engine adapter that replaces the subagents
+    consensus-review/
+      SKILL.md
+      agents/openai.yaml
+install.sh                     # raw-path based installer (--target claude|codex|both)
+VERSION                        # current version (single line, semver)
+CHANGELOG.md                   # release history
 ```
 
-The repo mirrors the `~/.claude` layout, so you can also install manually by copying `.claude/` over your own, or vendor it per-project.
+Each payload directory mirrors its target, so you can also install manually by copying `.claude/` or `.codex/` over your own, or vendor either per-project.
