@@ -10,11 +10,11 @@ One model reviewing its own work tends to agree with itself. Three models that f
 |---|---|---|
 | Skill | `consensus` | Round-based consensus loop for decisions (architecture, library choice, irreversible work) and a 2-track cross-review workflow for code writing |
 | Skill | `consensus-review` | Runs every `*-worker` agent in parallel with the same review prompt and aggregates the findings into one deduplicated, severity-sorted report |
-| Agent | `claude-worker` | Claude answers the given prompt in a context independent from the one that wrote the code (via a headless `claude -p --effort` session when a specific effort is requested) |
+| Agent | `claude-worker` | Relays through `worker.sh claude` to a fresh headless Claude session |
 | Agent | `codex-worker` | Relays the given prompt to `codex exec -s read-only` and returns Codex's answer |
 | Agent | `gemini-worker` | Relays the given prompt to the Antigravity CLI (`agy --mode plan`) and returns Gemini's answer |
 
-For **Codex CLI** the same two skills ship under `.codex/`, with one difference: Codex has no user-definable subagents, so the three worker agents are replaced by a single executable adapter.
+Both hosts use the same executable adapter. Claude Code exposes named worker agents that relay through it; the Codex skills invoke it directly. The canonical runner lives under `.codex/`; the installer places a real executable copy in each selected target.
 
 | Type | Name | What it does |
 |---|---|---|
@@ -39,6 +39,7 @@ This downloads the skills and agents from this repo's raw paths into `~/.claude/
 
 ```
 ~/.claude/skills/consensus/SKILL.md
+~/.claude/skills/consensus/scripts/worker.sh
 ~/.claude/skills/consensus-review/SKILL.md
 ~/.claude/agents/claude-worker.md
 ~/.claude/agents/codex-worker.md
@@ -117,7 +118,7 @@ The installer registers a Claude Code `SessionStart` hook that runs `~/.claude/s
 
 The external CLIs are *optional but recommended*: the workflows degrade gracefully. Any agent that fails (not installed, not logged in, spend cap, timeout) is reported and excluded, and the round continues with the remaining participants — down to the host alone if necessary. The installer checks the CLIs each target actually invokes and names the seat that would be lost.
 
-On the Codex target one guard does not transfer: `codex exec` has no equivalent of Claude's `--safe-mode` / `--disallowed-tools`, so a delegated Codex seat still enumerates the installed skills and still runs the user's hooks. The runner prepends a delegated-reviewer instruction to every Codex prompt as a behavioral mitigation; see `references/workers.md` for what that does and does not cover.
+On the Codex target one guard does not transfer: `codex exec` has no equivalent of Claude's `--safe-mode` / `--disallowed-tools`, so a delegated Codex seat still enumerates the installed skills and still runs the user's hooks. Both hosts use the runner, which prepends a delegated-reviewer instruction and rejects nested runner calls via an inherited environment marker; see `references/workers.md` for what that does and does not cover.
 
 ## Usage
 
@@ -177,7 +178,7 @@ Each worker reports the level it actually ran at (`[Codex effort=xhigh]`), and t
 
 - **Independence first.** Round 1 opinions are formed blind. Cross-round quotes are verbatim, never paraphrased — summaries distort and anchor.
 - **Evidence beats debate.** Anything verifiable is verified, not argued. Model headcount does not guarantee correctness; models can share biases.
-- **External agents never touch your files.** All invocations are read-only (`codex -s read-only`, `agy --mode plan`, and the headless Claude seat's `--permission-mode plan` with a read-only allow-list). Claude alone writes files and runs code/tests.
+- **External agents never touch your files.** All invocations are read-only (`codex -s read-only`, `agy --mode plan`, and the headless Claude seat's `--permission-mode plan` with a read-only allow-list). Only the writing host for that worktree applies changes and runs code/tests.
 - **Bounded cost.** Rebuttals are capped (2 for decisions, 1 for code review). Trivial changes (renames, typos, one-liners) skip the workflow entirely.
 - **Failures are loud.** A failed agent is excluded and reported — never silently dropped, never guessed for.
 
@@ -185,7 +186,7 @@ Each worker reports the level it actually ran at (`[Codex effort=xhigh]`), and t
 
 **Add a new model (Codex target):** add a `run_<engine>` function and a `case` arm to `.codex/skills/consensus/scripts/worker.sh`, a row to the participants table in `.codex/skills/consensus/SKILL.md`, and the engine's name to `ENGINES` in `.codex/skills/consensus-review/SKILL.md`.
 
-**Add a new model (Claude target):** drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the given prompt to that model's CLI read-only and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error), mapping an `Effort: <level>` directive onto that CLI's own flag (or ignoring it, if the engine has none). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
+**Add a new model (Claude target):** first add the engine to the shared runner, then drop a `{model}-worker.md` into `~/.claude/agents/` — a thin relay that passes the frozen prompt file to that engine in the shared runner and returns the answer prefixed with `[<Model>]` (or `[<Model> FAILED] <reason>` on error), mapping an `Effort: <level>` directive onto that CLI's own flag (or ignoring it, if the engine has none). Use an existing worker as a template.  `consensus-review` picks up any agent whose name ends in `-worker` (and matches the relay contract) automatically; for `consensus`, also register it in the participants table at the top of `skills/consensus/SKILL.md`. The workflows are participant-count agnostic.
 
 ## Repository layout
 
@@ -193,6 +194,7 @@ Each worker reports the level it actually ran at (`[Codex effort=xhigh]`), and t
 .claude/                       # Claude Code payload (mirrors ~/.claude)
   skills/
     consensus/SKILL.md         # decision consensus + 2-track code workflow
+    consensus/scripts/worker.sh # repository symlink to the canonical Codex runner
     consensus-review/SKILL.md  # parallel multi-model diff review
   agents/
     claude-worker.md
@@ -214,4 +216,30 @@ VERSION                        # current version (single line, semver)
 CHANGELOG.md                   # release history
 ```
 
-Each payload directory mirrors its target, so you can also install manually by copying `.claude/` or `.codex/` over your own, or vendor either per-project.
+Each payload directory mirrors its target. For manual copying or per-project vendoring of
+`.claude/` alone, dereference its runner symlink (for example, `cp -RL .claude/ <target>`).
+The installer already handles this and never requires a separate Codex installation.
+
+## Using both hosts concurrently
+
+Install with `--target both`, then use a separate branch/worktree for each writing host.
+Do not let both hosts edit the same worktree. Reviews may run concurrently: the parent
+captures the material once, passes every seat the same prompt and an empty temporary
+context (or immutable checkout), and checks for changed inputs before applying findings.
+This is a workflow rule; the skill does not install a filesystem lock on source files.
+
+Installers acquire all selected target locks before publishing files and fail fast if a
+peer holds one. Scripts are executable before publication, and version records are replaced
+atomically. This is per-file atomicity, not an atomic switch of an entire release: update
+between review rounds, freeze a runner copy for each round, and restart sessions afterwards.
+The Claude update hook serializes simultaneous checks and explicitly updates only Claude,
+regardless of `TARGET`. It also rechecks the observed version state under the install lock,
+so a manual install or pin during its network check takes precedence. Update both
+installations together with `--target both` when needed.
+
+Normal exits and handled signals release locks. If a process was forcibly killed, an empty
+`.ai-consensus-skill.install-lock` or `.ai-consensus-skill.update-lock` directory may remain
+inside its target. Remove it only after confirming no installer/update check still runs;
+locks are never automatically stolen from another process.
+
+Offline integration checks: `python3 -m unittest discover -s tests -v`.

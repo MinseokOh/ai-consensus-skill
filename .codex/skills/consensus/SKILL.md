@@ -10,6 +10,29 @@ metadata:
 For important decisions in terminal-based work, do not decide alone. Gather independent
 opinions from external CLI agents and reach consensus before deciding.
 
+## Concurrent hosts and frozen review input
+
+- Keep **one writing host per worktree**. When another host is editing, use a separate
+  branch and worktree before drafting or applying fixes. Do not move, stash, or overwrite
+  another host's uncommitted work. Read-only reviews may run concurrently.
+- Freeze a review round once in the parent: resolve revision names to commit IDs, capture
+  the diff and explicitly scoped untracked text files, and embed any surrounding source
+  needed by the reviewers. Every seat receives the same material; workers must not resolve
+  the scope again. Do not sweep unrelated untracked files or credentials into the prompt.
+- For an active working tree, use an **empty temporary context directory** as `--cwd` and
+  tell reviewers to use only the embedded material, without reading the original project.
+  Alternatively, supply a separate immutable checkout of the reviewed revision. Do not
+  point reviewers at a worktree another host is changing. Empty-context review may need
+  more surrounding source embedded; gather it before launching the round.
+- Before applying findings, compare the reviewed commit IDs and scoped file contents with
+  the current target. If they changed, rebuild the input and review the affected changes;
+  do not apply stale findings. Worktree isolation is a workflow requirement, not a file
+  lock enforced by this skill.
+- Copy the runner into the round's unique temporary directory before launching any seats,
+  and pass that copy to every worker. Keep it for follow-up rounds. Install/update between
+  rounds and restart the session afterwards; per-file atomic replacement is not a whole
+  release snapshot. The installer serializes writers but does not lock running hosts.
+
 ## Participants
 
 Every external query runs through `scripts/worker.sh`, which starts the engine as a fresh,
@@ -248,8 +271,8 @@ opinion round → rebuttal → re-examination & ruling**.
    omits untracked files, so append the **contents** of every new file in scope — naming them
    leaves the Gemini seat with nothing to read while the Claude and Codex seats reach them
    through `--cwd`, and the seats are then not reviewing the same material. The same holds for
-   non-git or new-file-only work: embed each file's contents, not just its path. Pass `--cwd
-   <project dir>` so the Claude and Codex seats can also check surrounding code.
+   non-git or new-file-only work: embed each file's contents, not just its path. Use the frozen review context described above; embed surrounding code instead of reading
+   the original worktree during the round.
 
 3. **Opinion round (aggregation)**: organize everyone's findings item by item — content,
    source, whether commonly flagged, whether reviewers conflict. Do **not** rule at this

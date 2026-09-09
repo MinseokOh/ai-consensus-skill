@@ -7,23 +7,50 @@ description: A workflow where Claude and external CLI agents (Codex, Gemini) for
 
 For important decisions in terminal-based work, Claude does not decide alone. Instead, it gathers independent opinions from external CLI agents and reaches consensus before deciding.
 
+## Concurrent hosts and frozen review input
+
+- Keep **one writing host per worktree**. When another host is editing, use a separate
+  branch and worktree before drafting or applying fixes. Do not move, stash, or overwrite
+  another host's uncommitted work. Read-only reviews may run concurrently.
+- Freeze a review round once in the parent: resolve revision names to commit IDs, capture
+  the diff and explicitly scoped untracked text files, and embed any surrounding source
+  needed by the reviewers. Every seat receives the same material; workers must not resolve
+  the scope again. Do not sweep unrelated untracked files or credentials into the prompt.
+- For an active working tree, use an **empty temporary context directory** as `--cwd` and
+  tell reviewers to use only the embedded material, without reading the original project.
+  Alternatively, supply a separate immutable checkout of the reviewed revision. Do not
+  point reviewers at a worktree another host is changing. Empty-context review may need
+  more surrounding source embedded; gather it before launching the round.
+- Before applying findings, compare the reviewed commit IDs and scoped file contents with
+  the current target. If they changed, rebuild the input and review the affected changes;
+  do not apply stale findings. Worktree isolation is a workflow requirement, not a file
+  lock enforced by this skill.
+- Copy the runner into the round's unique temporary directory before launching any seats,
+  and pass that copy to every worker. Keep it for follow-up rounds. Install/update between
+  rounds and restart the session afterwards; per-file atomic replacement is not a whole
+  release snapshot. The installer serializes writers but does not lock running hosts.
+
 ## Participants (Worker Pattern)
 
-All external queries run through **worker subagents** (Agent tool) — thin relays that take an arbitrary prompt, execute it read-only, and return the answer as data. The workers don't know what kind of question they carry; **this skill composes every prompt** (question, review, rebuttal). Running everything as subagents keeps each query visible as a named background task in UIs and centralizes CLI handling in one place per engine.
+All external queries run through **worker subagents** (Agent tool) — thin relays that take an arbitrary prompt, execute it read-only, and return the answer as data. The workers don't know what kind of question they carry; **this skill composes every prompt** (question, review, rebuttal). Running everything as subagents keeps each query visible as a named background task in UIs and centralizes CLI handling in the shared `skills/consensus/scripts/worker.sh` adapter.
 
 | Participant | Worker agent | Underlying engine |
 |---|---|---|
-| Claude | `claude-worker` | Claude subagent in an independent context (headless `claude -p --effort <level>` when an effort level is requested) |
+| Claude | `claude-worker` | `worker.sh claude` (fresh headless Claude session) |
 | Codex | `codex-worker` | `codex exec -s read-only` |
 | Gemini | `gemini-worker` | `agy --mode plan` (Antigravity CLI; the worker internalizes agy's no-stdin/no-tools handling) |
 
 - Launch workers for the same round **in a single message** (parallel execution). From round 2 on, continue the **same worker** via SendMessage — the worker subagent keeps its conversation context (the stateless external CLI behind it is re-invoked internally, so remind the worker to re-attach any referenced diff/material).
 - In **decision mode**, the main-context Claude is itself the Claude participant (it locks in its position before reading worker results). In **code mode's review rounds**, the main context is anchored to its own draft, so `claude-worker` takes the Claude seat instead (in Critical Track's implementation step, where no draft exists yet to anchor on, the main context writes Claude's implementation itself).
 - Steps below that name `codex-worker` and `gemini-worker` mean **every external worker registered in this table** — a newly added worker joins all of them automatically.
-- To add a new agent, add a `{model}-worker` agent file (a thin read-only relay to its CLI, same return contract) and register it in this table. The workflow applies identically regardless of participant count.
+- To add a new agent, add an engine to the shared runner and a `{model}-worker` agent file (a thin relay to that engine, same return contract) and register it in this table. The workflow applies identically regardless of participant count.
 - **Effort**: every worker also accepts a worker-directed `Effort: <low|medium|high|xhigh|max>` line alongside the prompt and maps it to its own engine (`claude -p --effort`, `codex exec -c model_reasoning_effort=`, `agy --effort`); with no directive each engine keeps its own default. Raise it where depth pays off — Critical Track implementations, hard-to-reverse decisions, a rebuttal round that turns on a subtle fact — and leave it alone for routine rounds. Use the same level for every participant in a round, or their answers are not comparable. agy caps at `high`, so `xhigh`/`max` run there as `high`; workers report what they actually used as `[<Model> effort=<level>]`, which is what belongs in the report. The `consensus-review` skill's "Review effort" section holds the level-picking rules.
 - **Failure fallback**: A worker that fails to run or returns `[<Agent> FAILED] …` is reported to the master and excluded from the decision. A participant that fails mid-round is excluded from that point on, and the majority denominator is updated. If only one external agent remains, use the two-party rule (agreement = consensus; on disagreement the master decides). If all fail, proceed with Claude's sole judgment. However, for **hard-to-reverse work**, do not proceed on Claude's sole judgment when all external agents have failed — get the master's confirmation. Never silently hide failures.
-- **No-worker fallback**: if the worker agents are not installed, invoke the CLIs directly with the same prompts via Bash (`run_in_background` for parallelism): `codex exec -s read-only --skip-git-repo-check "<prompt>" 2>&1` (repo context: run in the project dir, drop the flag, pipe diffs via stdin) and `agy -p "Do not run any tools; answer using only the text below. <prompt + all referenced material embedded via command substitution>" --mode plan 2>&1`. Append the effort flags when a level was chosen: `-c model_reasoning_effort="<level>"` for codex, `--effort <level>` for agy — mapped first, since agy takes only `low|medium|high` and fails on a raw `xhigh`/`max`. See Cautions for the agy pitfalls the gemini-worker normally handles.
+- **No-worker fallback**: invoke the same payload's `skills/consensus/scripts/worker.sh`
+  directly, once per engine in parallel, using one frozen prompt file and context directory.
+  Do not bypass the runner with raw CLI commands: its delegated-reviewer guard prevents
+  child Codex sessions from starting another consensus round. If the runner is missing,
+  report the missing dependency and reinstall the payload before retrying.
 
 ## Scope (Important Decisions)
 
@@ -149,7 +176,10 @@ Cross-review runs on the same round structure as the decision consensus loop: **
    Review the changes in <project dir>, scope: git diff HEAD (staged + unstaged; also read the new untracked files: <list, if any>). Point out, item by item: (1) bugs/logic errors, (2) missed edge cases, (3) better approaches/simplifications, (4) quality issues in readability/complexity/duplication/naming/error handling. Return findings as '{file}:{line} | {severity(high/medium/low)} | {description}' lines; if there are no issues, answer 'No issues'.
    ```
 
-   Each worker resolves the scope its own way: claude-worker reads the diff and surrounding code directly; codex-worker runs Codex inside the project (Codex reads the repo read-only); gemini-worker embeds the diff/file contents into the agy prompt itself. Non-git or new-file-only work: name the files to review instead of a diff scope.
+   Freeze and embed the diff, scoped untracked text files and required surrounding source
+   once in the parent. Pass the identical prompt file, frozen runner and empty context
+   directory to every worker. Non-git or new-file-only work also needs embedded contents.
+   Instruct reviewers to use only this material, without reading the original worktree.
 
 3. **Opinion round (aggregation)**: Organize everyone's findings item by item — content, source, whether commonly flagged, whether reviewers conflict. The moderator does **not** rule at this stage (organize only, so the moderator's preconceptions don't contaminate the rebuttal round).
 
@@ -217,7 +247,7 @@ The **Consensus process** summary is always included in the default report. For 
 
 - All external execution is read-only (codex: `-s read-only`, agy: `--mode plan`, headless Claude: `--permission-mode plan` with a read-only allow-list) — workers relay opinions only; the main context does the executing.
 - Effort multiplies cost and latency: `xhigh`/`max` on a large diff can run several minutes per participant, and a round labeled `max` is not `max` for Gemini (agy stops at `high`). Say which level a round ran at rather than letting the reader assume.
-- Budget the timeout by effort, not a flat number: ~120s per external CLI call at default effort, but a ~50-line diff measured ~35-70s at `low` and several minutes at `xhigh` (the headless Claude seat took ~8 minutes). Each worker file carries its own per-level budget — never cut a round off at 120s when the effort was deliberately raised. A worker that exceeds its budget is excluded from that decision (if all are excluded, Claude decides alone).
+- Use a 600-second timeout per external CLI call for every model and effort level. Retries share that budget. A worker that exceeds it is excluded and reported according to the failure rules.
 - Do not include sensitive information (API keys, passwords, etc.) in prompts.
-- The following matters mainly for the **no-worker fallback** (the workers internalize it): don't type long content containing quotes, `$()`, or backticks directly into CLI prompt strings — pipe via stdin for Codex, embed via command substitution (`$(...)`) for agy, and route special-character-laden text (e.g., rebuttal quotes) through temp files with `$(cat <file>)`. agy headless reads no stdin and auto-denies file/command permissions, so its prompt must start with "Do not run any tools; answer using only the text below" and carry all material inline; on `permission check failed` retry once, then apply the failure fallback. Never use `--dangerously-skip-permissions`.
+- The no-worker fallback uses the same runner and prompt-file transport. Do not reconstruct raw CLI invocations; effort mapping, safe prompt transport and bounded retries belong to the adapter.
 - **Gemini is invoked via the Antigravity CLI (`agy`)**: the old `gemini` (gemini-cli) is not used — personal-account support was discontinued 2026-06. agy uses Google-account login; on not-logged-in or quota-exceeded, exclude and report per the failure-fallback rule.

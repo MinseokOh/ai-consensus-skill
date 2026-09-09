@@ -1,0 +1,1 @@
+../../../../.codex/skills/consensus/scripts/worker.sh

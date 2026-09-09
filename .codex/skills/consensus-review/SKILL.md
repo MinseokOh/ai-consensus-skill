@@ -10,6 +10,29 @@ metadata:
 Run every available engine concurrently against the same review prompt, so each model
 reviews the same diff independently, then aggregate and report the results.
 
+## Concurrent hosts and frozen review input
+
+- Keep **one writing host per worktree**. When another host is editing, use a separate
+  branch and worktree before drafting or applying fixes. Do not move, stash, or overwrite
+  another host's uncommitted work. Read-only reviews may run concurrently.
+- Freeze a review round once in the parent: resolve revision names to commit IDs, capture
+  the diff and explicitly scoped untracked text files, and embed any surrounding source
+  needed by the reviewers. Every seat receives the same material; workers must not resolve
+  the scope again. Do not sweep unrelated untracked files or credentials into the prompt.
+- For an active working tree, use an **empty temporary context directory** as `--cwd` and
+  tell reviewers to use only the embedded material, without reading the original project.
+  Alternatively, supply a separate immutable checkout of the reviewed revision. Do not
+  point reviewers at a worktree another host is changing. Empty-context review may need
+  more surrounding source embedded; gather it before launching the round.
+- Before applying findings, compare the reviewed commit IDs and scoped file contents with
+  the current target. If they changed, rebuild the input and review the affected changes;
+  do not apply stale findings. Worktree isolation is a workflow requirement, not a file
+  lock enforced by this skill.
+- Copy the runner into the round's unique temporary directory before launching any seats,
+  and pass that copy to every worker. Keep it for follow-up rounds. Install/update between
+  rounds and restart the session afterwards; per-file atomic replacement is not a whole
+  release snapshot. The installer serializes writers but does not lock running hosts.
+
 ## Review seats
 
 Engines are driven by the shared runner installed with the `consensus` skill:
@@ -74,9 +97,10 @@ deliberate choice instead of whatever default each engine happens to carry.
    ```bash
    PROJECT="$PWD"; SCOPE="main...HEAD"; EFFORT="medium"   # from the scope/effort decided above
    D="$(mktemp -d)"
+   mkdir "$D/context"
    {
      cat <<PROMPT
-   Review the diff $SCOPE in $PROJECT. Look for problems from these perspectives: (1) bugs/logic errors (2) missed edge cases (3) concurrency/transaction issues (4) performance issues (5) security vulnerabilities. Return each finding as a '{file path}:{line} | {severity(high/medium/low)} | {description}' line. If there are no problems, answer 'No findings'.
+   Review the embedded diff $SCOPE from $PROJECT. Use only the embedded material; do not read the original worktree. Look for problems from these perspectives: (1) bugs/logic errors (2) missed edge cases (3) concurrency/transaction issues (4) performance issues (5) security vulnerabilities. Return each finding as a '{file path}:{line} | {severity(high/medium/low)} | {description}' line. If there are no problems, answer 'No findings'.
    PROMPT
      printf '\n'
      git -C "$PROJECT" diff "$SCOPE"
@@ -106,10 +130,11 @@ deliberate choice instead of whatever default each engine happens to carry.
 2. Launch every seat **in parallel**, each into its own output file, then wait for the round:
 
    ```bash
-   W="<consensus skill dir>/scripts/worker.sh"
+   cp "<consensus skill dir>/scripts/worker.sh" "$D/worker.sh"
+   W="$D/worker.sh"
    ENGINES=(claude codex gemini)   # every engine in the consensus skill's participants table
    for e in "${ENGINES[@]}"; do
-     "$W" "$e" --prompt-file "$D/prompt.txt" --effort "$EFFORT" --cwd "$PROJECT" > "$D/$e.out" 2>&1 &
+     "$W" "$e" --prompt-file "$D/prompt.txt" --effort "$EFFORT" --cwd "$D/context" > "$D/$e.out" 2>&1 &
    done
    wait
    ```
@@ -120,7 +145,7 @@ deliberate choice instead of whatever default each engine happens to carry.
    `ENGINES` is the one place this skill names its seats: when an engine is added to the
    `consensus` skill's participants table and to `worker.sh`, add it here as well.
 
-   `--cwd` lets the Claude and Codex seats read surrounding code beyond the embedded diff.
+   `--cwd` points at the empty context; embed required surrounding code before launching.
    Collect results separately and read them only after `wait` — a seat that could see
    another seat's answer is not an independent seat.
 

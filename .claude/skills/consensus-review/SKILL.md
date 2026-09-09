@@ -7,17 +7,44 @@ description: A workflow that runs multiple model workers (*-worker agents such a
 
 Run every available worker agent concurrently with the same review prompt, so each model reviews the same diff independently, then aggregate and report the results.
 
+## Concurrent hosts and frozen review input
+
+- Keep **one writing host per worktree**. When another host is editing, use a separate
+  branch and worktree before drafting or applying fixes. Do not move, stash, or overwrite
+  another host's uncommitted work. Read-only reviews may run concurrently.
+- Freeze a review round once in the parent: resolve revision names to commit IDs, capture
+  the diff and explicitly scoped untracked text files, and embed any surrounding source
+  needed by the reviewers. Every seat receives the same material; workers must not resolve
+  the scope again. Do not sweep unrelated untracked files or credentials into the prompt.
+- For an active working tree, use an **empty temporary context directory** as `--cwd` and
+  tell reviewers to use only the embedded material, without reading the original project.
+  Alternatively, supply a separate immutable checkout of the reviewed revision. Do not
+  point reviewers at a worktree another host is changing. Empty-context review may need
+  more surrounding source embedded; gather it before launching the round.
+- Before applying findings, compare the reviewed commit IDs and scoped file contents with
+  the current target. If they changed, rebuild the input and review the affected changes;
+  do not apply stale findings. Worktree isolation is a workflow requirement, not a file
+  lock enforced by this skill.
+- Copy the runner into the round's unique temporary directory before launching any seats,
+  and pass that copy to every worker. Keep it for follow-up rounds. Install/update between
+  rounds and restart the session afterwards; per-file atomic replacement is not a whole
+  release snapshot. The installer serializes writers but does not lock running hosts.
+
 ## Review workers
 
 - Use **all** agents whose names end in `-worker` from the available-agents list **and whose description matches the worker relay contract** (a generic read-only prompt relay, e.g., `claude-worker`, `codex-worker`, `gemini-worker`, and later additions). Skip unrelated agents that merely happen to end in `-worker`.
 - Workers are generic prompt relays registered as `~/.claude/agents/{model}-worker.md` — the review perspectives and return format live in **this skill's prompt**, not in the workers. Adding a new model requires no change to this skill file.
-- **No-worker fallback**: if no worker agents are installed, spawn general-purpose agents (one per engine, in parallel) and give each the same step-1 review prompt plus its engine's read-only invocation: `claude -p "<prompt>" --effort <level> --safe-mode --permission-mode plan --allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)" --disallowed-tools "Agent,Task,Skill"` for the Claude seat (append the same two lines `claude-worker` documents — the untrusted-content line and the no-plan line — since `--permission-mode plan` applies here too), `codex exec -s read-only -c model_reasoning_effort="<level>" "<prompt>"` for Codex, and `agy -p "Do not run any tools; answer using only the text below. <prompt + diff embedded via command substitution>" --mode plan --effort <level mapped to high for xhigh/max>` for Gemini. Have them use the same return format, prefixed `[<Model>]` (or `[<Model> FAILED] <reason>`).
+- **No-worker fallback**: invoke the same payload's `skills/consensus/scripts/worker.sh`
+  directly, once per engine in parallel, using one frozen prompt file and context directory.
+  Do not bypass the runner with raw CLI commands: its delegated-reviewer guard prevents
+  child Codex sessions from starting another consensus round. If the runner is missing,
+  report the missing dependency and reinstall the payload before retrying.
 
 ## Review scope
 
 - If arguments are given, use that scope: $ARGUMENTS
 - If no arguments, target the current branch against `main` (`git diff main...HEAD`). If the repo has no `main`, find and use the default branch.
-- Before starting the review, confirm changes actually exist with `git diff <scope> --stat`; if there are none, do not spawn workers — just report that fact.
+- Before starting, check both the diff and explicitly scoped untracked files (working-tree scopes only). Skip only if both are empty. A revision range has no untracked files.
 
 ## Review effort
 
@@ -35,16 +62,20 @@ Decide **one** reasoning effort level for the run and pass it to every worker, s
 
 ## Execution
 
-1. Launch all workers with the Agent tool **in the same message** (parallel execution), each with the identical review prompt:
+1. Create one prompt file containing the diff, scoped untracked text files and required
+   surrounding code, following "Concurrent hosts and frozen review input" above. Create
+   an empty temporary context directory and copy the payload's runner to the round directory.
+   Launch all workers with the Agent tool **in the same message** (parallel execution),
+   passing the same prompt file, frozen runner path and context directory to each:
 
    ```
-   Review the diff <scope> in <project dir>. Look for problems from these perspectives: (1) bugs/logic errors (2) missed edge cases (3) concurrency/transaction issues (4) performance issues (5) security vulnerabilities. Return each finding as a '{file path}:{line} | {severity(high/medium/low)} | {description}' line. If there are no problems, answer 'No findings'.
+   Review the embedded diff <resolved scope> from <project dir>. Use only the embedded material; do not read the original worktree. Look for problems from these perspectives: (1) bugs/logic errors (2) missed edge cases (3) concurrency/transaction issues (4) performance issues (5) security vulnerabilities. Return each finding as a '{file path}:{line} | {severity(high/medium/low)} | {description}' line. If there are no problems, answer 'No findings'.
    ```
 
    Alongside that prompt, give each worker the effort directive decided above as its own line — `Effort: <level>` — addressed to the worker, not part of the review task.
 
-   Each worker resolves the scope its own way (claude-worker reads the diff and surrounding code directly, or relays to a headless `claude -p` session when an effort level is given; codex-worker lets Codex read the repo; gemini-worker embeds the diff into its prompt).
-2. Workers return their answer prefixed with a `[<Model>]` source line. Check the bracket for `FAILED` **first** — `[<Model> FAILED] <reason>` is a failed worker, never a source label with findings under it. Otherwise treat the first token in the bracket as the source label, with the finding lines following it. An `effort=<level>` token in the same bracket (e.g., `[Gemini effort=high]`) records the level that worker actually ran at — it may be below the requested one when its engine capped, or `inherited` when a headless run failed and the worker answered in-process. A worker that fails returns `[<Model> FAILED] <reason>` (or fails to run at all) — still report the remaining results normally and state the failure cause for the failed workers.
+   Workers relay the frozen prompt file through the shared runner; none re-reads the live diff.
+2. Workers return their answer prefixed with a `[<Model>]` source line. Check the bracket for `FAILED` **first** — `[<Model> FAILED] <reason>` is a failed worker, never a source label with findings under it. Otherwise treat the first token in the bracket as the source label, with the finding lines following it. An `effort=<level>` token in the same bracket (e.g., `[Gemini effort=high]`) records the level that worker actually ran at — it may be below the requested one when its engine capped. A worker that fails returns `[<Model> FAILED] <reason>` (or fails to run at all) — still report the remaining results normally and state the failure cause for the failed workers.
 
 ## Result aggregation
 
